@@ -6,6 +6,7 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
@@ -17,11 +18,51 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
+
+      - name: install musl if not windows
+        run:   |
+         if [ "$RUNNER_OS" == "Linux" ]; then
+              sudo apt install musl-tools -y
+         elif [ "$RUNNER_OS" == "Windows" ]; then
+              echo nothing to do on windows
+         else
+              echo "$RUNNER_OS not supported"
+              exit 1
+         fi
+         if [ ${{ matrix.target }} == "aarch64-unknown-linux-musl" ]; then
+                cargo install cross
+         fi
+        shell: bash
+
+      - name: add target
+        run: rustup target add ${{ matrix.target }}
+
       - name: build
         run: |
-          cargo build --release
+         if [ ${{ matrix.target }} == "aarch64-unknown-linux-musl" ]; then
+                cross build --release --target ${{ matrix.target }}
+         else
+            cargo build --release --target ${{ matrix.target }} 
+         fi
+        shell: bash
+        
+      - name: strip if not windows
+        run: |
+         if [ "$RUNNER_OS" == "Linux" ]; then
+             strip target/${{ matrix.target }}/release/fubuki
+         elif [ "$RUNNER_OS" == "Windows" ]; then
+              echo nothing to do on windows
+         else
+              echo "$RUNNER_OS not supported"
+              exit 1
+         fi
+        shell: bash
+
       - name: upload
         uses: actions/upload-artifact@v2
         with:
           name: ${{ matrix.target }}
-          path: target/release/fubu*
+          path: |
+            target/${{ matrix.target }}/release/fubuki
+            target/${{ matrix.target }}/release/fubuki.exe
+          if-exists: true
