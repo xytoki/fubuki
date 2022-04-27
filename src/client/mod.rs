@@ -18,7 +18,7 @@ use tokio::time;
 pub use api::{call, Req};
 
 use crate::client::api::api_start;
-use crate::common::cipher::Aes128Ctr;
+use crate::common::cipher::XorCipher;
 use crate::common::net::msg_operator::{TcpMsgReader, TcpMsgWriter, TCP_BUFF_SIZE, UDP_BUFF_SIZE};
 use crate::common::net::proto::{HeartbeatType, MsgResult, Node, NodeId, TcpMsg, UdpMsg};
 use crate::common::net::{proto, SocketExt};
@@ -71,7 +71,7 @@ struct InterfaceInfo<Map> {
     server_addr: String,
     tcp_handler_channel: Option<Sender<(Box<[u8]>, NodeId)>>,
     udp_socket: Option<Arc<UdpSocket>>,
-    key: Aes128Ctr,
+    key: XorCipher,
     try_send_to_lan_addr: bool,
 }
 
@@ -389,7 +389,7 @@ fn tun_handler<T: TunDevice>(tun: &T) -> Result<()> {
 fn udp_handler_inner<T: TunDevice>(
     tun: &T,
     socket: &UdpSocket,
-    key: &Aes128Ctr,
+    key: &XorCipher,
     heartbeat_seq: &AtomicU32,
 ) -> Result<()> {
     let mut buff = vec![0u8; UDP_BUFF_SIZE];

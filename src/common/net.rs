@@ -376,7 +376,7 @@ pub mod msg_operator {
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use tokio::net::UdpSocket;
 
-    use crate::common::cipher::Aes128Ctr;
+    use crate::common::cipher::XorCipher;
 
     use super::proto::{TcpMsg, UdpMsg};
 
@@ -385,12 +385,12 @@ pub mod msg_operator {
 
     pub struct TcpMsgReader<'a, Rx: AsyncRead + Unpin> {
         rx: &'a mut Rx,
-        key: &'a mut Aes128Ctr,
+        key: &'a mut XorCipher,
         buff: Box<[u8]>,
     }
 
     impl<'a, Rx: AsyncRead + Unpin> TcpMsgReader<'a, Rx> {
-        pub fn new(rx: &'a mut Rx, key: &'a mut Aes128Ctr) -> Self {
+        pub fn new(rx: &'a mut Rx, key: &'a mut XorCipher) -> Self {
             let buff = vec![0u8; TCP_BUFF_SIZE].into_boxed_slice();
             TcpMsgReader { rx, key, buff }
         }
@@ -411,12 +411,12 @@ pub mod msg_operator {
 
     pub struct TcpMsgWriter<'a, Tx: AsyncWrite + Unpin> {
         tx: &'a mut Tx,
-        key: &'a mut Aes128Ctr,
+        key: &'a mut XorCipher,
         buff: Box<[u8]>,
     }
 
     impl<'a, Tx: AsyncWrite + Unpin> TcpMsgWriter<'a, Tx> {
-        pub fn new(tx: &'a mut Tx, key: &'a mut Aes128Ctr) -> Self {
+        pub fn new(tx: &'a mut Tx, key: &'a mut XorCipher) -> Self {
             let buff = vec![0u8; TCP_BUFF_SIZE].into_boxed_slice();
             TcpMsgWriter { tx, key, buff }
         }
@@ -440,12 +440,12 @@ pub mod msg_operator {
     #[derive(Clone)]
     pub struct UdpMsgSocket<'a> {
         socket: &'a UdpSocket,
-        key: Aes128Ctr,
+        key: XorCipher,
         buff: Box<[u8]>,
     }
 
     impl<'a> UdpMsgSocket<'a> {
-        pub fn new(socket: &'a UdpSocket, key: Aes128Ctr) -> Self {
+        pub fn new(socket: &'a UdpSocket, key: XorCipher) -> Self {
             UdpMsgSocket {
                 socket,
                 key,

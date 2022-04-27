@@ -1,29 +1,20 @@
-use aes::cipher::{InnerIvInit, KeyInit, StreamCipher};
-use aes::Aes128;
-use ctr::{Ctr32BE, CtrCore};
-
-pub struct Aes128Ctr {
-    inner_key: Aes128,
-    inner: ctr::Ctr32BE<aes::Aes128>,
+pub struct XorCipher {
+    key: [u8; 16],
 }
 
-impl Aes128Ctr {
-    pub fn new(key: &[u8]) -> Self {
-        let mut inner_key = [0u8; 16];
-        inner_key.copy_from_slice(md5::compute(key).as_slice());
+impl XorCipher {
+    pub fn new(keystr: &[u8]) -> Self {
+        let mut key = [0u8; 16];
+        key.copy_from_slice(md5::compute(keystr).as_slice());
 
-        let aes = aes::Aes128::new_from_slice(&inner_key).unwrap();
-        let core = CtrCore::inner_iv_init(aes.clone(), (&[0u8; 16]).into());
-
-        Aes128Ctr {
-            inner: Ctr32BE::from_core(core),
-            inner_key: aes,
-        }
+        XorCipher { key }
     }
 
     #[inline]
     fn in_place(&mut self, data: &mut [u8]) {
-        self.inner.apply_keystream(data);
+        for i in 0..data.len() {
+            data[i] ^= self.key[i % 16];
+        }
     }
 
     #[inline]
@@ -37,13 +28,10 @@ impl Aes128Ctr {
     }
 }
 
-impl Clone for Aes128Ctr {
+impl Clone for XorCipher {
     fn clone(&self) -> Self {
-        let core = CtrCore::inner_iv_init(self.inner_key.clone(), (&[0u8; 16]).into());
-
-        Aes128Ctr {
-            inner: Ctr32BE::from_core(core),
-            inner_key: self.inner_key.clone(),
+        XorCipher {
+            key: self.key.clone(),
         }
     }
 }

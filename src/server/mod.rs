@@ -14,7 +14,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, watch};
 use tokio::{sync, time};
 
-use crate::common::cipher::Aes128Ctr;
+use crate::common::cipher::XorCipher;
 use crate::common::net::msg_operator::{TcpMsgReader, TcpMsgWriter, UdpMsgSocket, TCP_BUFF_SIZE};
 use crate::common::net::proto::{HeartbeatType, MsgResult, Node, NodeId, TcpMsg, UdpMsg};
 use crate::common::net::SocketExt;
@@ -127,7 +127,7 @@ impl NodeDb {
     }
 }
 
-async fn udp_handler(listen_addr: SocketAddr, key: Aes128Ctr, node_db: Arc<NodeDb>) -> Result<()> {
+async fn udp_handler(listen_addr: SocketAddr, key: XorCipher, node_db: Arc<NodeDb>) -> Result<()> {
     let socket = UdpSocket::bind(listen_addr)
         .await
         .with_context(|| format!("UDP socket bind {} error", listen_addr))?;
@@ -173,7 +173,7 @@ async fn udp_handler(listen_addr: SocketAddr, key: Aes128Ctr, node_db: Arc<NodeD
     }
 }
 
-async fn tcp_handler(listen_addr: SocketAddr, key: Aes128Ctr, node_db: Arc<NodeDb>) -> Result<()> {
+async fn tcp_handler(listen_addr: SocketAddr, key: XorCipher, node_db: Arc<NodeDb>) -> Result<()> {
     let listener = TcpListener::bind(listen_addr)
         .await
         .with_context(|| format!("TCP socket bind {} error", listen_addr))?;
@@ -193,7 +193,7 @@ async fn tcp_handler(listen_addr: SocketAddr, key: Aes128Ctr, node_db: Arc<NodeD
     }
 }
 
-async fn tunnel(mut stream: TcpStream, key: Aes128Ctr, node_db: Arc<NodeDb>) -> Result<()> {
+async fn tunnel(mut stream: TcpStream, key: XorCipher, node_db: Arc<NodeDb>) -> Result<()> {
     stream.set_keepalive()?;
     let (rx, mut tx) = stream.split();
     let mut rx = BufReader::with_capacity(TCP_BUFF_SIZE, rx);
@@ -315,7 +315,7 @@ pub(super) async fn start(server_config: ServerConfigFinalize) {
 
     for Listener { listen_addr, key } in &get_config().listeners {
         let handle = async move {
-            let key = Aes128Ctr::new(key.as_bytes());
+            let key = XorCipher::new(key.as_bytes());
             let node_db = Arc::new(NodeDb::new());
             let key_ref = key.clone();
             let node_db_ref = node_db.clone();
