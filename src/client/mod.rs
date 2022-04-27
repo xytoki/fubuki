@@ -15,9 +15,6 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{unbounded_channel, Receiver, Sender};
 use tokio::time;
 
-pub use api::{call, Req};
-
-use crate::client::api::api_start;
 use crate::common::cipher::XorCipher;
 use crate::common::net::msg_operator::{TcpMsgReader, TcpMsgWriter, TCP_BUFF_SIZE, UDP_BUFF_SIZE};
 use crate::common::net::proto::{HeartbeatType, MsgResult, Node, NodeId, TcpMsg, UdpMsg};
@@ -26,8 +23,6 @@ use crate::common::{HashMap, HashSet, MapInit, SetInit};
 use crate::tun::create_device;
 use crate::tun::TunDevice;
 use crate::{ClientConfigFinalize, NetworkRangeFinalize, TunIpAddr};
-
-mod api;
 
 static mut LOCAL_NODE_ID: NodeId = 0;
 static mut CONFIG: MaybeUninit<ClientConfigFinalize> = MaybeUninit::uninit();
@@ -133,23 +128,6 @@ impl InterfaceMap {
         }
         Some(map)
     }
-
-    fn load(&self) -> HashMap<Ipv4Addr, InterfaceInfo<Arc<HashMap<Ipv4Addr, Node>>>> {
-        let mut map = HashMap::with_capacity(self.map.len());
-
-        for (k, node_map) in &self.map {
-            let range = InterfaceInfo {
-                server_addr: node_map.server_addr.clone(),
-                node_map: node_map.node_map.read().clone(),
-                tcp_handler_channel: node_map.tcp_handler_channel.clone(),
-                udp_socket: node_map.udp_socket.clone(),
-                key: node_map.key.clone(),
-                try_send_to_lan_addr: node_map.try_send_to_lan_addr,
-            };
-            map.insert(*k, range);
-        }
-        map
-    }
 }
 
 macro_rules! init_interface_map {
@@ -199,11 +177,6 @@ impl DirectNodeList {
         let guard = self.list.try_read()?;
         let set: HashSet<NodeId> = guard.keys().copied().collect();
         Some(set)
-    }
-
-    fn load(&self) -> HashSet<NodeId> {
-        let guard = self.list.read();
-        guard.keys().copied().collect()
     }
 
     fn try_update(&self, node_id: NodeId) {
@@ -882,13 +855,8 @@ pub(super) async fn start(config: ClientConfigFinalize) -> Result<()> {
     } else {
         std::future::pending().left_future()
     };
-    let api_handle = async {
-        tokio::spawn(api_start(get_config().api_addr))
-            .await
-            .context("API handler error")?
-    };
 
     info!("Client start");
-    tokio::try_join!(tun_handle, tcp_handle, udp_handle, api_handle)?;
+    tokio::try_join!(tun_handle, tcp_handle, udp_handle)?;
     Ok(())
 }

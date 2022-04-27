@@ -17,7 +17,6 @@ use serde::{de, Deserialize};
 
 use tokio::runtime::Runtime;
 
-use crate::client::Req;
 use crate::common::cipher::XorCipher;
 use crate::common::net::get_interface_addr;
 use crate::common::net::proto::ProtocolMode;
@@ -94,7 +93,6 @@ struct NetworkRange {
 struct ClientConfig {
     mtu: Option<usize>,
     channel_limit: Option<usize>,
-    api_addr: Option<SocketAddr>,
     tcp_heartbeat_interval_secs: Option<u64>,
     udp_heartbeat_interval_secs: Option<u64>,
     reconnect_interval_secs: Option<u64>,
@@ -119,7 +117,6 @@ struct NetworkRangeFinalize {
 struct ClientConfigFinalize {
     mtu: usize,
     channel_limit: usize,
-    api_addr: SocketAddr,
     tcp_heartbeat_interval: Duration,
     udp_heartbeat_interval: Duration,
     reconnect_interval: Duration,
@@ -168,9 +165,6 @@ impl TryFrom<ClientConfig> for ClientConfigFinalize {
 
             let range_finalize = NetworkRangeFinalize {
                 server_addr: {
-                    if resolve_server_addr.ip().is_loopback() {
-                        return Err(anyhow!("Server address cannot be a loopback address"));
-                    }
                     range.server_addr
                 },
                 tun: range.tun,
@@ -185,9 +179,6 @@ impl TryFrom<ClientConfig> for ClientConfigFinalize {
         let config_finalize = ClientConfigFinalize {
             mtu: config.mtu.unwrap_or(1462),
             channel_limit: config.channel_limit.unwrap_or(100),
-            api_addr: config
-                .api_addr
-                .unwrap_or_else(|| SocketAddr::from((Ipv4Addr::LOCALHOST, 3030))),
             tcp_heartbeat_interval: config
                 .tcp_heartbeat_interval_secs
                 .map(|sec| Duration::from_secs(ternary!(sec > 10, 10, sec)))
@@ -211,8 +202,7 @@ const INVALID_COMMAND: &str = "Invalid command";
 
 enum Args {
     Server(Option<String>),
-    Client(Option<String>),
-    Info(Option<String>),
+    Client(Option<String>)
 }
 
 impl Args {
@@ -225,7 +215,6 @@ impl Args {
         let args = match mode.as_str() {
             "client" => Args::Client(option),
             "server" => Args::Server(option),
-            "info" => Args::Info(option),
             _ => return Err(anyhow!(INVALID_COMMAND)),
         };
         Ok(args)
@@ -263,9 +252,6 @@ fn launch() -> Result<()> {
             let config: ClientConfig = load_config(path.as_deref().unwrap_or("config.json"))?;
 
             block_on!(client::start(ClientConfigFinalize::try_from(config)?))
-        }
-        Args::Info(option) => {
-            client::call(Req::NodeMap, option.as_deref().unwrap_or("127.0.0.1:3030"))
         }
     }
 }
