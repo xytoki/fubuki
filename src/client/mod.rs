@@ -20,8 +20,8 @@ use crate::common::net::msg_operator::{TcpMsgReader, TcpMsgWriter, TCP_BUFF_SIZE
 use crate::common::net::proto::{HeartbeatType, MsgResult, Node, NodeId, TcpMsg, UdpMsg};
 use crate::common::net::{proto, SocketExt};
 use crate::common::{HashMap, HashSet, MapInit, SetInit};
-use crate::tun::create_device;
 use crate::tun::TunDevice;
+use crate::tun::{create_device, skip_error};
 use crate::{ClientConfigFinalize, NetworkRangeFinalize, TunIpAddr};
 
 static mut LOCAL_NODE_ID: NodeId = 0;
@@ -62,6 +62,7 @@ fn get_direct_node_list() -> &'static DirectNodeList {
 }
 
 struct InterfaceInfo<Map> {
+    tun: TunIpAddr,
     node_map: Map,
     server_addr: String,
     tcp_handler_channel: Option<Sender<(Box<[u8]>, NodeId)>>,
@@ -82,6 +83,7 @@ impl InterfaceMap {
             .into_iter()
             .map(|(tun_addr, info)| {
                 let network_segment = InterfaceInfo {
+                    tun: info.tun,
                     server_addr: info.server_addr,
                     node_map: RwLock::new(Arc::new(HashMap::new())),
                     tcp_handler_channel: info.tcp_handler_channel,
@@ -117,6 +119,7 @@ impl InterfaceMap {
 
         for (k, node_map) in &self.map {
             let range = InterfaceInfo {
+                tun: node_map.tun.clone(),
                 server_addr: node_map.server_addr.clone(),
                 node_map: node_map.node_map.try_read()?.clone(),
                 tcp_handler_channel: node_map.tcp_handler_channel.clone(),
@@ -127,6 +130,24 @@ impl InterfaceMap {
             map.insert(*k, range);
         }
         Some(map)
+    }
+
+    fn load(&self) -> HashMap<Ipv4Addr, InterfaceInfo<Arc<HashMap<Ipv4Addr, Node>>>> {
+        let mut map = HashMap::with_capacity(self.map.len());
+
+        for (k, node_map) in &self.map {
+            let range = InterfaceInfo {
+                tun: node_map.tun.clone(),
+                server_addr: node_map.server_addr.clone(),
+                node_map: node_map.node_map.read().clone(),
+                tcp_handler_channel: node_map.tcp_handler_channel.clone(),
+                udp_socket: node_map.udp_socket.clone(),
+                key: node_map.key.clone(),
+                try_send_to_lan_addr: node_map.try_send_to_lan_addr,
+            };
+            map.insert(*k, range);
+        }
+        map
     }
 }
 
@@ -262,7 +283,14 @@ fn tun_handler<T: TunDevice>(tun: &T) -> Result<()> {
         let dst_addr = proto::get_ip_dst_addr(data)?;
 
         if src_addr == dst_addr {
-            tun.send_packet(data)?;
+            match tun.send_packet(data) {
+                Err(e) if skip_error(&e) => {
+                    error!("Write packet to tun error: {}", e);
+                    Ok(())
+                }
+                res => res,
+            }
+            .context("Write packet to tun error")?;
             continue;
         }
 
@@ -274,6 +302,8 @@ fn tun_handler<T: TunDevice>(tun: &T) -> Result<()> {
             None => continue,
         };
 
+        let direct_node_list: &HashSet<NodeId> = get_local_direct_node_list!();
+
         macro_rules! send {
             ($local_node: expr, $dst_node: expr) => {
                 if $local_node.mode.udp_support() && $dst_node.mode.udp_support() {
@@ -284,8 +314,7 @@ fn tun_handler<T: TunDevice>(tun: &T) -> Result<()> {
                         ..
                     } = $dst_node
                     {
-                        let direct_node_list: &HashSet<NodeId> = get_local_direct_node_list!();
-
+                        // TODO There will be different port with the same id
                         if direct_node_list.contains(node_id) {
                             let peer_addr = if interface_info.try_send_to_lan_addr {
                                 match $local_node.wan_udp_addr {
@@ -340,7 +369,15 @@ fn tun_handler<T: TunDevice>(tun: &T) -> Result<()> {
             None => continue,
         };
 
-        if dst_addr.is_broadcast() {
+        fn is_broadcast(dst: Ipv4Addr, prefix_len: u32) -> bool {
+            dst.is_broadcast()
+                || Ipv4Addr::from(u32::from(dst) | u32::MAX.checked_shr(prefix_len).unwrap_or(0))
+                    == dst
+        }
+
+        if let Some(dst_node) = interface_info.node_map.get(&dst_addr) {
+            send!(local_node, dst_node);
+        } else if is_broadcast(dst_addr, u32::from(interface_info.tun.netmask).count_ones()) {
             for dst_node in interface_info.node_map.values() {
                 if dst_node.id == get_local_node_id() {
                     continue;
@@ -348,13 +385,6 @@ fn tun_handler<T: TunDevice>(tun: &T) -> Result<()> {
 
                 send!(local_node, dst_node);
             }
-        } else {
-            let dst_node = match interface_info.node_map.get(&dst_addr) {
-                Some(v) => v,
-                None => continue,
-            };
-
-            send!(local_node, dst_node);
         }
     }
 }
@@ -390,7 +420,15 @@ fn udp_handler_inner<T: TunDevice>(
                 }
                 UdpMsg::Data(data) => {
                     debug!("Recv packet from {}", peer_addr);
-                    tun.send_packet(data)?
+
+                    match tun.send_packet(data) {
+                        Err(e) if skip_error(&e) => {
+                            error!("Write packet to tun error: {}", e);
+                            Ok(())
+                        }
+                        res => res,
+                    }
+                    .context("Write packet to tun error")?;
                 }
                 _ => continue,
             }
@@ -554,12 +592,10 @@ async fn tcp_handler_inner(
     loop {
         let mut node = init_node.clone();
         node.register_time = Utc::now().timestamp();
-        let inner_to_tun = &to_tun;
-        let inner_from_tun = &mut from_tun;
         let mut tx_key = network_range_info.key.clone();
         let mut rx_key = network_range_info.key.clone();
 
-        let process = async move {
+        let process = async {
             let mut stream = TcpStream::connect(&network_range_info.server_addr)
                 .await
                 .with_context(|| format!("Connect to {} error", &network_range_info.server_addr))?;
@@ -595,14 +631,9 @@ async fn tcp_handler_inner(
             let (tx, mut rx) = unbounded_channel::<TcpMsg>();
 
             let latest_recv_heartbeat_time = AtomicI64::new(Utc::now().timestamp());
-            let latest_recv_heartbeat_time_ref1 = &latest_recv_heartbeat_time;
-            let latest_recv_heartbeat_time_ref2 = &latest_recv_heartbeat_time;
-
             let seq = AtomicU32::new(0);
-            let inner_seq1 = &seq;
-            let inner_seq2 = &seq;
 
-            let fut1 = async move {
+            let fut1 = async {
                 loop {
                     match msg_reader.read().await? {
                         TcpMsg::NodeMap(node_map) => {
@@ -614,7 +645,7 @@ async fn tcp_handler_inner(
                             get_interface_map().update(&network_range_info.tun.ip, mapping);
                         }
                         TcpMsg::Forward(packet, _) => {
-                            if let Some(to_tun) = inner_to_tun {
+                            if let Some(ref to_tun) = to_tun {
                                 debug!("Recv packet from {}", &network_range_info.server_addr);
                                 to_tun.send(packet.into())?
                             }
@@ -628,8 +659,8 @@ async fn tcp_handler_inner(
                             }
                         }
                         TcpMsg::Heartbeat(recv_seq, HeartbeatType::Resp) => {
-                            if inner_seq1.load(Ordering::Relaxed) == recv_seq {
-                                latest_recv_heartbeat_time_ref1
+                            if seq.load(Ordering::Relaxed) == recv_seq {
+                                latest_recv_heartbeat_time
                                     .store(Utc::now().timestamp(), Ordering::Relaxed)
                             }
                         }
@@ -638,7 +669,7 @@ async fn tcp_handler_inner(
                 }
             };
 
-            let fut2 = async move {
+            let fut2 = async {
                 let mut heartbeat_interval = time::interval(get_config().tcp_heartbeat_interval);
                 let mut check_heartbeat_timeout = time::interval(Duration::from_secs(30));
 
@@ -650,8 +681,8 @@ async fn tcp_handler_inner(
                                 None => return Ok(())
                             }
                         }
-                        opt = match inner_from_tun {
-                            Some(v) => v.recv().right_future(),
+                        opt = match from_tun {
+                            Some(ref mut v) => v.recv().right_future(),
                             None => std::future::pending().left_future()
                         } => {
                             match opt {
@@ -663,12 +694,12 @@ async fn tcp_handler_inner(
                             }
                         }
                         _ = heartbeat_interval.tick() => {
-                            let old = inner_seq2.fetch_add(1, Ordering::Relaxed);
+                            let old = seq.fetch_add(1, Ordering::Relaxed);
                             let heartbeat = TcpMsg::Heartbeat(old + 1, HeartbeatType::Req);
                             msg_writer.write(&heartbeat).await?;
                         }
                         _ = check_heartbeat_timeout.tick() => {
-                            if Utc::now().timestamp() - latest_recv_heartbeat_time_ref2.load(Ordering::Relaxed) > 30 {
+                            if Utc::now().timestamp() - latest_recv_heartbeat_time.load(Ordering::Relaxed) > 30 {
                                 return Err(anyhow!("Heartbeat recv timeout"))
                             }
                         }
@@ -696,8 +727,15 @@ fn mpsc_to_tun<T: TunDevice>(
 ) -> Result<()> {
     loop {
         let packet = mpsc_rx.recv()?;
-        tun.send_packet(&packet)
-            .context("Write packet to tun error")?;
+
+        match tun.send_packet(&packet) {
+            Err(e) if skip_error(&e) => {
+                error!("Write packet to tun error: {}", e);
+                Ok(())
+            }
+            res => res,
+        }
+        .context("Write packet to tun error")?;
     }
 }
 
@@ -807,6 +845,7 @@ pub(super) async fn start(config: ClientConfigFinalize) -> Result<()> {
         tcp_handler_initialize.insert(range.tun.ip, (rx, init_node));
 
         let info = InterfaceInfo {
+            tun: range.tun.clone(),
             node_map: (),
             server_addr: range.server_addr.clone(),
             tcp_handler_channel: tx,
